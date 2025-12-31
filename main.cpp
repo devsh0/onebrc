@@ -372,6 +372,10 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
 
 	while (beg + 32 <= end) {
 		u8* city_beg = beg;
+
+		// Prefetch the next line. Significantly reduces LLC misses.
+		_mm_prefetch(city_beg + 1 * 64, _MM_HINT_T0);
+
 		__m256i entry_vec = _mm256_loadu_si256((__m256i const*)city_beg);
     	__m256i semicolon_cmp_res = _mm256_cmpeq_epi8(entry_vec, semicolon_vec);
 		u32 semicolon_mask = (u32)_mm256_movemask_epi8(semicolon_cmp_res);

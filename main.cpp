@@ -109,8 +109,8 @@ struct Entry {
 	int city_name_length = 0;
     int total_temperature = 0;
 	int occurrences = 0;
-	int min = 0;
-	int max = 0;
+	short min = 0;
+	short max = 0;
 
 	void print() {
 		printf("%s=%.1f/%.1f/%.1f", city_name, min / 10.f, (total_temperature / 10.f) / (float)occurrences, max / 10.f);

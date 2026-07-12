@@ -20,7 +20,7 @@
 #define BENCH_END_AND_REPORT BENCH_END; BENCH_REPORT
 
 static constexpr int N_WORKERS = 64;
-static constexpr size_t N_BUCKETS = 2000;
+static constexpr size_t N_BUCKETS = 3017;
 static constexpr int NAME_LENGTH = 40;
 
 using u8 = uint8_t;

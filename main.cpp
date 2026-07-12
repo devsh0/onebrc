@@ -117,13 +117,13 @@ struct Entry {
 	}
 };
 
-// Single Bucket Overhead = 2048 + 4 = 2052B ~= 2KiB.
+
 struct CityNameBucket {
 	// For default dataset, the hashing is good enough to never map to a single
 	// bucket more than these many times; for dataset with keys < 1k, we won't
 	// touch many buckets, but the map is wide enough horizontally that it's not
 	// a concern. Remains to be seen how we'd do in the 10k data set.
-    static constexpr int capacity = 32;
+    static constexpr int capacity = 8;
 
 	Entry entries[capacity];
     int size = 0;

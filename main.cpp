@@ -21,7 +21,7 @@
 
 static constexpr int N_WORKERS = 64;
 static constexpr size_t N_BUCKETS = 2017;
-static constexpr int NAME_LENGTH = 38;
+static constexpr int NAME_LENGTH = 36;
 
 using u8 = uint8_t;
 using u16 = uint16_t;
@@ -139,8 +139,8 @@ struct CityNameBucket {
 			entries = (Entry*)realloc(entries, current_capacity * sizeof(Entry));
 		}
 
-		if (__builtin_expect(city_end - city_beg > NAME_LENGTH, 0)) {
-			printf("FIXME: can't handle city names > %d characters\n", NAME_LENGTH);
+		if (__builtin_expect(city_end - city_beg + 2 > NAME_LENGTH, 0)) {
+			printf("FIXME: can't handle city names > %d characters\n", NAME_LENGTH - 1);
 			exit(-1);
 		}
 

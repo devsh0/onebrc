@@ -105,12 +105,12 @@ struct TaskData {
 
 struct Entry {
 	char city_name[NAME_LENGTH];
-	int bucket_index = -1;
-	int city_name_length = 0;
     int total_temperature = 0;
 	int occurrences = 0;
 	short min = 0;
 	short max = 0;
+	short bucket_index = -1;
+	i8 city_name_length = 0;
 
 	void print() {
 		printf("%s=%.1f/%.1f/%.1f", city_name, min / 10.f, (total_temperature / 10.f) / (float)occurrences, max / 10.f);
@@ -248,14 +248,9 @@ struct CityNameBucket {
 };
 
 struct CityNameMap {
-	// Single bucket overhead ~= 2 KiB; Total overhead = N_BUCKETS * 2052B ~= 4 MiB.
-	// Most of these are zero buckets. This implies we only ever touch a few
-	// buckets throughout the execution. For 10k dataset, a better approach to
-	// improve L1d utilization could be to store the keys (i.e. city names)
-	// separately and shrink the bucket count. Also, mmap a large enough chunk
-	// and use it as arena for every allocation in this map, including entries.
     CityNameBucket buckets[N_BUCKETS];
 
+	// Some city names are 3-byte long. But what follows is a semicolon so we're good.
 	u32 lol_hash(u8* city_beg, u8* city_end) {
 		u32 hash_value = *((u32*)city_beg);
 		return hash_value % N_BUCKETS;
@@ -521,7 +516,7 @@ int main(int argc, char** argv) {
 	std::vector<Entry> entries = sort_entries(result);
 	report(entries);
 	printf("\n\n");
-    BENCH_END_AND_REPORT;
+	BENCH_END_AND_REPORT;
 
 	munmap(data, file_size);
 	delete result;

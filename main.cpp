@@ -123,15 +123,20 @@ struct CityNameBucket {
 	// bucket more than these many times; for dataset with keys < 1k, we won't
 	// touch many buckets, but the map is wide enough horizontally that it's not
 	// a concern. Remains to be seen how we'd do in the 10k data set.
-    static constexpr int capacity = 8;
+    static constexpr int factor = 2;
 
-	Entry entries[capacity];
-    int size = 0;
+	Entry* entries = nullptr;
+	u8 current_capacity = 0;
+    u8 size = 0;
 
 	Entry* add_new_entry(u8* city_beg, u8* city_end, int temperature, int bucket_index) {
-		if (__builtin_expect(size == capacity, 0)) {
-			printf("FIXME: need more bucket entries\n");
-			exit(-1);
+		if (__builtin_expect(size == current_capacity, 0)) {
+			if (current_capacity == 0) {
+				current_capacity = 1;
+			} else {
+				current_capacity *= factor;
+			}
+			entries = (Entry*)realloc(entries, current_capacity * sizeof(Entry));
 		}
 
 		if (__builtin_expect(city_end - city_beg > NAME_LENGTH, 0)) {

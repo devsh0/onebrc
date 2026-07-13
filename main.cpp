@@ -318,6 +318,8 @@ void do_merge(CityNameMap* map, CombinationTaskQueue* combination_task_queue) {
 	combination_task_queue->unlock();
 }
 
+// Branchless temperature parsing. This is in the hotpath.
+// Introducing even a single branch costs 80-100ms.
 int parse_temperature(u8* num_beg, int& len) {
     int sign = 1 - 2 * (num_beg[0] == '-');
     int pos = (num_beg[0] == '-');
@@ -373,8 +375,8 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
 			u32 bucket_index = map->hash_and_prefetch(beg);
 			u8* semi = beg + __builtin_ctz(semi_mask);
 			int nl = 0;
-			int t = parse_temperature(semi + 1, nl);
-			map->insert_avx2(window, beg, semi - 1, t, bucket_index);
+			int temperature = parse_temperature(semi + 1, nl);
+			map->insert_avx2(window, beg, semi - 1, temperature, bucket_index);
 			beg = semi + 1 + nl + 1;
 			continue;
 		}
@@ -382,7 +384,8 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
 		u8* city_beg1 = beg;
 		u8* city_beg2 = beg + __builtin_ctz(nl_mask) + 1;
 
-		// Both line starts are known at this point. Hash and prefetch both in parallel.
+		// Both line-starts are known at this point. Hash and prefetch corresponding
+		// hash-bucket entries early so that we don't miss L1 when we need it.
 		u32 bucket_index1 = map->hash_and_prefetch(city_beg1);
 		u32 bucket_index2 = map->hash_and_prefetch(city_beg2);
 
@@ -419,6 +422,7 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
 
 	while (beg + 32 <= end) {
 		u8* city_beg = beg;
+		// Hash early to find the bucket, then prefetch the entries to prevent L1d load miss.
 		u32 bucket_index = map->hash_and_prefetch(city_beg);
 		__m256i entry_vec = _mm256_loadu_si256((__m256i const*)city_beg);
 		__m256i semicolon_cmp_res = _mm256_cmpeq_epi8(entry_vec, semicolon_vec);

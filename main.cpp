@@ -21,7 +21,7 @@
 
 static constexpr int N_WORKERS = 64;
 static constexpr size_t N_BUCKETS = 2017;
-static constexpr int NAME_LENGTH = 36;
+static constexpr int NAME_LENGTH = 40;
 
 using u8 = uint8_t;
 using u16 = uint16_t;
@@ -119,10 +119,6 @@ struct Entry {
 
 
 struct CityNameBucket {
-	// For default dataset, the hashing is good enough to never map to a single
-	// bucket more than these many times; for dataset with keys < 1k, we won't
-	// touch many buckets, but the map is wide enough horizontally that it's not
-	// a concern. Remains to be seen how we'd do in the 10k data set.
     static constexpr int factor = 2;
 
 	Entry* entries = nullptr;
@@ -132,6 +128,7 @@ struct CityNameBucket {
 	Entry* add_new_entry(u8* city_beg, u8* city_end, int temperature, int bucket_index) {
 		if (__builtin_expect(size == current_capacity, 0)) {
 			if (current_capacity == 0) {
+				// Most buckets only hold a single entry. So start out thin.
 				current_capacity = 1;
 			} else {
 				current_capacity *= factor;
@@ -251,20 +248,19 @@ struct CityNameMap {
     CityNameBucket buckets[N_BUCKETS];
 
 	// Some city names are 3-byte long. But what follows is a semicolon so we're good.
-	u32 lol_hash(u8* city_beg, u8* city_end) {
-		u32 hash_value = *((u32*)city_beg);
-		return hash_value % N_BUCKETS;
+	u32 hash_and_prefetch(u8* city_beg) {
+		u32 index = *((u32*)city_beg);
+		index = index % N_BUCKETS;
+		_mm_prefetch(buckets[index].entries, _MM_HINT_T0);
+		return index;
 	}
 
-    void insert(u8* city_beg, u8* city_end, int temperature) {
-        int index = lol_hash(city_beg, city_end);
-        buckets[index].upsert(city_beg, city_end, temperature, index);
+    void insert(u8* city_beg, u8* city_end, int temperature, u32 bucket_index) {
+        buckets[bucket_index].upsert(city_beg, city_end, temperature, bucket_index);
     }
 
-	void insert_avx2(__m256i& city_vec, u8* city_beg, u8* city_end, int temperature) {
-		int index = lol_hash(city_beg, city_end);
-		_mm_prefetch(buckets[index].entries, _MM_HINT_T0);
-		buckets[index].upsert_avx2(city_vec, city_beg, city_end, temperature, index);
+	void insert_avx2(__m256i& city_vec, u8* city_beg, u8* city_end, int temperature, u32 bucket_index) {
+		buckets[bucket_index].upsert_avx2(city_vec, city_beg, city_end, temperature, bucket_index);
 	}
 
 	void merge(Entry& e) {
@@ -360,7 +356,8 @@ void parse_helper(u8* beg, u8* end, CityNameMap* map) {
 
 		int num_len = 0;
 		int temperature = parse_temperature(beg, num_len);
-		map->insert(city_beg, city_end, temperature);
+		u32 index = map->hash_and_prefetch(city_beg);
+		map->insert(city_beg, city_end, temperature, index);
 		beg += num_len + 1; // also skip the new line.
     }
 }
@@ -371,45 +368,62 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
 	CityNameMap* map = new CityNameMap;
 	__m256i semicolon_vec = _mm256_set1_epi8(';');
 
+	__m256i newline_vec = _mm256_set1_epi8('\n');
+
 	while (beg + 64 <= end) {
+		// Find the first newline to locate line 2 start — no dependency on line 1 parsing
+		__m256i window = _mm256_loadu_si256((__m256i const*)beg);
+		__m256i nl_cmp = _mm256_cmpeq_epi8(window, newline_vec);
+		u32 nl_mask = (u32)_mm256_movemask_epi8(nl_cmp);
+		if (nl_mask == 0) {
+			// No newline in first 32 bytes — process this line alone
+			__m256i semi_cmp = _mm256_cmpeq_epi8(window, semicolon_vec);
+			u32 semi_mask = (u32)_mm256_movemask_epi8(semi_cmp);
+			if (semi_mask == 0) { printf("FIXME: didn't find semicolon!\n"); exit(1); }
+			u32 idx = map->hash_and_prefetch(beg);
+			u8* semi = beg + __builtin_ctz(semi_mask);
+			int nl = 0;
+			int t = parse_temperature(semi + 1, nl);
+			map->insert_avx2(window, beg, semi - 1, t, idx);
+			beg = semi + 1 + nl + 1;
+			continue;
+		}
+
 		u8* city_beg1 = beg;
-		_mm_prefetch(city_beg1 + 64, _MM_HINT_T0);
-		_mm_prefetch(city_beg1 + 128, _MM_HINT_T0);
+		u8* city_beg2 = beg + __builtin_ctz(nl_mask) + 1;
 
-		// Load + semicolon search for line 1
-		__m256i entry_vec1 = _mm256_loadu_si256((__m256i const*)city_beg1);
-		__m256i cmp1 = _mm256_cmpeq_epi8(entry_vec1, semicolon_vec);
-		u32 mask1 = (u32)_mm256_movemask_epi8(cmp1);
-		if (mask1 == 0) { printf("FIXME: didn't find semicolon!\n"); exit(1); }
+		// Both line starts are known — hash and prefetch both in parallel
+		u32 index1 = map->hash_and_prefetch(city_beg1);
+		u32 index2 = map->hash_and_prefetch(city_beg2);
 
-		// Decode line 1 to find line 2 start
-		u8* semi1 = beg + __builtin_ctz(mask1);
+		// Line 1: semicolon search (reuse the already-loaded window)
+		__m256i semi_cmp1 = _mm256_cmpeq_epi8(window, semicolon_vec);
+		u32 semi_mask1 = (u32)_mm256_movemask_epi8(semi_cmp1);
+		if (semi_mask1 == 0) { printf("FIXME: didn't find semicolon!\n"); exit(1); }
+		u8* semi1 = beg + __builtin_ctz(semi_mask1);
 		u8* city_end1 = semi1 - 1;
-		u8* num_beg1 = semi1 + 1;
 		int num_len1 = 0;
-		int temp1 = parse_temperature(num_beg1, num_len1);
-		u8* city_beg2 = num_beg1 + num_len1 + 1;
+		int temp1 = parse_temperature(semi1 + 1, num_len1);
 
-		// Load + semicolon search for line 2 (interleaved with line 1's insert)
+		// Line 2: load + semicolon search (independent of line 1)
 		__m256i entry_vec2 = _mm256_loadu_si256((__m256i const*)city_beg2);
-		__m256i cmp2 = _mm256_cmpeq_epi8(entry_vec2, semicolon_vec);
-		u32 mask2 = (u32)_mm256_movemask_epi8(cmp2);
-
-		map->insert_avx2(entry_vec1, city_beg1, city_end1, temp1);
-
-		if (mask2 == 0) { printf("FIXME: didn't find semicolon!\n"); exit(1); }
-		u8* semi2 = city_beg2 + __builtin_ctz(mask2);
+		__m256i semi_cmp2 = _mm256_cmpeq_epi8(entry_vec2, semicolon_vec);
+		u32 semi_mask2 = (u32)_mm256_movemask_epi8(semi_cmp2);
+		if (semi_mask2 == 0) { printf("FIXME: didn't find semicolon!\n"); exit(1); }
+		u8* semi2 = city_beg2 + __builtin_ctz(semi_mask2);
 		u8* city_end2 = semi2 - 1;
-		u8* num_beg2 = semi2 + 1;
 		int num_len2 = 0;
-		int temp2 = parse_temperature(num_beg2, num_len2);
+		int temp2 = parse_temperature(semi2 + 1, num_len2);
 
-		map->insert_avx2(entry_vec2, city_beg2, city_end2, temp2);
-		beg = num_beg2 + num_len2 + 1;
+		// Insert both
+		map->insert_avx2(window, city_beg1, city_end1, temp1, index1);
+		map->insert_avx2(entry_vec2, city_beg2, city_end2, temp2, index2);
+		beg = semi2 + 1 + num_len2 + 1;
 	}
 
 	while (beg + 32 <= end) {
 		u8* city_beg = beg;
+		u32 index = map->hash_and_prefetch(city_beg);
 		__m256i entry_vec = _mm256_loadu_si256((__m256i const*)city_beg);
 		__m256i semicolon_cmp_res = _mm256_cmpeq_epi8(entry_vec, semicolon_vec);
 		u32 semicolon_mask = (u32)_mm256_movemask_epi8(semicolon_cmp_res);
@@ -424,7 +438,7 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
 		u8* num_beg = semicolon_at + 1;
 		int num_len = 0;
 		int temperature = parse_temperature(num_beg, num_len);
-		map->insert_avx2(entry_vec, city_beg, city_end, temperature);
+		map->insert_avx2(entry_vec, city_beg, city_end, temperature, index);
 		beg = num_beg + num_len + 1;
 	}
 

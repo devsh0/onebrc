@@ -318,30 +318,18 @@ void do_merge(CityNameMap* map, CombinationTaskQueue* combination_task_queue) {
 	combination_task_queue->unlock();
 }
 
-// Requires that the buffer has ~8 bytes of padding at the end to be safe.
-// This is true because mmap pads to page size, but if the file size was a
-// multiple of 4K, we'd probably crash.
 int parse_temperature(u8* num_beg, int& len) {
-    bool is_neg = (*num_beg == '-');
-    int sign_offset = is_neg;
-    u64 word = *(u64*)(num_beg + sign_offset);
-    u8 second_byte = (word >> 8) & 0xFF;
-    bool is_short = (second_byte == '.');
-    u64 d0 = word & 0xF;
-    u64 d1 = (word >> 8) & 0xF;
-    u64 d2 = (word >> 16) & 0xF;
-    u64 d3 = (word >> 24) & 0xF;
-
-    int val;
-    if (is_short) {
-        val = d0 * 10 + d2;
-        len = sign_offset + 3;
-    } else {
-        val = d0 * 100 + d1 * 10 + d3;
-        len = sign_offset + 4;
-    }
-
-    return is_neg ? -val : val;
+    int sign = 1 - 2 * (num_beg[0] == '-');
+    int pos = (num_beg[0] == '-');
+    u32 uvalue;
+    memcpy(&uvalue, num_beg + pos, 4);
+    int shift = 8 * (num_beg[pos + 1] == '.');
+    uvalue <<= shift;
+    constexpr u64 C = 1 + (10 << 16) + (100 << 24);
+    uvalue &= 0x0f000f0f;
+    uvalue = ((uvalue * C) >> 24) & 0x3ff;
+    len = pos + 4 - (shift >> 3);
+    return (int)uvalue * sign;
 }
 
 void parse_helper(u8* beg, u8* end, CityNameMap* map) {

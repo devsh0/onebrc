@@ -20,7 +20,6 @@
 #define BENCH_END_AND_REPORT BENCH_END; BENCH_REPORT
 
 static constexpr int N_WORKERS = 64;
-// 1243
 static constexpr size_t N_BUCKETS = 2017;
 static constexpr int NAME_LENGTH = 39;
 
@@ -255,7 +254,6 @@ struct CityNameMap {
         index = index % N_BUCKETS;
         u8* entries = (u8 *) buckets[index].entries;
         _mm_prefetch(entries, _MM_HINT_T0);
-        _mm_prefetch(entries + 64, _MM_HINT_T0);
         return index;
     }
 

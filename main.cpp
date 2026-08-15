@@ -10,9 +10,12 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
 #include <immintrin.h>
 #include <time.h>
 
+#define gettid() ((pid_t)syscall(SYS_gettid))
 #define BENCH_START u64 __start_time = micros()
 #define BENCH_END u64 __total_time = micros() - __start_time
 #define BENCH_ACCUMULATE(val) (val += micros() - __start_time)
@@ -171,6 +174,21 @@ struct CityNameBucket {
             u32 cmp_mask = (u32) _mm256_movemask_epi8(cmp_res);
             cmp_mask = ~cmp_mask;
             int count = __builtin_ctz(cmp_mask);
+
+            // Note to future self: find a way to get rid of this branch. Perhaps try a hash
+            // function that improves load-balancing compared to what we have right now?
+            // THIS BRANCH IS SUPER ANNOYING. Buckets hold two (or more) entries often enough,
+            // resulting in the SKL predictor mispredict quite a lot because it can't figure
+            // out whether to jump back to loop top or to the instruction following the call site.
+            // Symmetrizing loop execution to always require at least 2 iterations and replacing
+            // the jump with cmovcc does worse because that significantly increases INST_RETIRED.
+            // Attempting to reduce load/bucket by increasing total bucket count causes backend
+            // stalls due to more L1 misses. In addition to better hashing, you could also try
+            // packing the city names tightly in a separate arena and keeping only a 32-bit offset
+            // to each city name in Entry. Currently, we dedicate a sparse ~40B buffer for every
+            // city name in the map which increases L1 footprint. If nothing else, the city name
+            // allocator would buy us some headroom to widen the Entry array, hopefully reducing
+            // the number of >1 entry buckets in the map.
             if (count >= e->city_name_length) {
                 return e;
             }
@@ -305,6 +323,31 @@ CityNameMap* merge_task_helper(CombinationTask& ct) {
     delete map_b;
 
     return merge_map;
+}
+
+void print_bucket_size_distribution(CityNameMap& map) {
+    constexpr int size_bins = 20;
+    u8 size_buckets[size_bins];
+    memset(size_buckets, 0, size_bins);
+    for (int bin = 1; bin < size_bins; bin++) {
+        for (int j = 0; j < N_BUCKETS; j++) {
+            if (map.buckets[j].size == bin) {
+                size_buckets[bin] += 1;
+            }
+        }
+    }
+    constexpr int buf_size = 1024;
+    char buf[buf_size];
+    memset(buf, 0, buf_size);
+    int tid = gettid();
+    int offset = sprintf(buf, "-- THREAD = #%d --\n", tid);
+    sprintf(buf, "-- THREAD = #%d --\n", tid);
+    for (int bin = 1; bin < size_bins; bin++) {
+        if (size_buckets[bin] > 0) {
+            offset += sprintf(buf + offset, "size=%d: buckets=%d\n", bin, size_buckets[bin]);
+        }
+    }
+    printf("%s", buf);
 }
 
 void do_merge(CityNameMap* map, CombinationTaskQueue* combination_task_queue) {
@@ -445,6 +488,7 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
     }
 
     parse_helper(beg, end, map);
+    // print_bucket_size_distribution(*map);
     do_merge(map, combination_task_queue);
 }
 

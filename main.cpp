@@ -107,7 +107,7 @@ struct TaskData {
     int cpuid = -1;
 };
 
-struct Entry {
+struct alignas(64) Entry {
     char city_name[NAME_LENGTH];
     i8 city_name_length = 0;
     int total_temperature = 0;
@@ -137,7 +137,12 @@ struct CityNameBucket {
             } else {
                 current_capacity *= factor;
             }
-            entries = (Entry *) realloc(entries, current_capacity * sizeof(Entry));
+            auto* new_entries = (Entry*) aligned_alloc(alignof(Entry), current_capacity * sizeof(Entry));
+            if (entries) {
+                memcpy(new_entries, entries, size * sizeof(Entry));
+                free(entries);
+            }
+            entries = new_entries;
         }
 
         if (__builtin_expect(city_end - city_beg + 2 > NAME_LENGTH, 0)) {
@@ -178,7 +183,7 @@ struct CityNameBucket {
             // Note to future self: find a way to get rid of this branch. Perhaps try a hash
             // function that improves load-balancing compared to what we have right now?
             // THIS BRANCH IS SUPER ANNOYING. Buckets hold two (or more) entries often enough,
-            // resulting in the SKL predictor mispredict quite a lot because it can't figure
+            // resulting in the SKX predictor mispredict quite a lot because it can't figure
             // out whether to jump back to loop top or to the instruction following the call site.
             // Symmetrizing loop execution to always require at least 2 iterations and replacing
             // the jump with cmovcc does worse because that significantly increases INST_RETIRED.
@@ -341,7 +346,6 @@ void print_bucket_size_distribution(CityNameMap& map) {
     memset(buf, 0, buf_size);
     int tid = gettid();
     int offset = sprintf(buf, "-- THREAD = #%d --\n", tid);
-    sprintf(buf, "-- THREAD = #%d --\n", tid);
     for (int bin = 1; bin < size_bins; bin++) {
         if (size_buckets[bin] > 0) {
             offset += sprintf(buf + offset, "size=%d: buckets=%d\n", bin, size_buckets[bin]);
@@ -492,22 +496,22 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
     do_merge(map, combination_task_queue);
 }
 
-void pinme(int cpuid) {
+void pin_current_thread(int cpuid) {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(cpuid, &cpuset);
 
     if (sched_setaffinity(0, sizeof(cpu_set_t), &cpuset) == -1) {
         perror("sched_setaffinity");
-        return;
+        exit(-1);
     }
 }
 
 void* read_task(void* vdata) {
     TaskData* task = (TaskData *) vdata;
-    pinme(task->cpuid);
+    pin_current_thread(task->cpuid);
     parse_avx2(task->beg, task->end, task->combination_task_queue);
-    return NULL;
+    return nullptr;
 }
 
 size_t newline_distance_from(u8* end) {
@@ -555,7 +559,7 @@ void map_file(const char* path, u8*& data, size_t& file_size) {
     struct stat status;
     fstat(fd, &status);
     file_size = status.st_size;
-    data = (u8 *) mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    data = (u8 *) mmap((void*)0x1000000000, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (data == MAP_FAILED) {
         perror("mmap");
         exit(-1);
@@ -566,7 +570,6 @@ void map_file(const char* path, u8*& data, size_t& file_size) {
 std::vector<Entry> sort_entries(CityNameMap* map) {
     std::vector<Entry> vec;
     vec.reserve(N_BUCKETS);
-    int cur = 0;
     for (int i = 0; i < N_BUCKETS; i++) {
         CityNameBucket& bucket = map->buckets[i];
         for (int j = 0; j < bucket.size; j++) {

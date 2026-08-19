@@ -69,8 +69,13 @@ struct CombinationTaskQueue {
         while (true) {
             bool expected = false;
             bool desired = true;
-            bool success = __atomic_compare_exchange_n(&is_locked, &expected, desired, false, __ATOMIC_ACQUIRE,
-                                                       __ATOMIC_RELAXED);
+            bool success = __atomic_compare_exchange_n(
+                &is_locked,
+                &expected,
+                desired,
+                false,
+                __ATOMIC_ACQUIRE,
+                __ATOMIC_RELAXED);
             if (success) {
                 return;
             }
@@ -180,20 +185,37 @@ struct CityNameBucket {
             cmp_mask = ~cmp_mask;
             int count = __builtin_ctz(cmp_mask);
 
-            // Note to future self: find a way to get rid of this branch. Perhaps try a hash
-            // function that improves load-balancing compared to what we have right now?
+            // Note to self: find a way to get rid of this branch. Perhaps try a hash function
+            // that improves load-balancing compared to what we have right now?
+            //
             // THIS BRANCH IS SUPER ANNOYING. Buckets hold two (or more) entries often enough,
             // resulting in the SKX predictor mispredict quite a lot because it can't figure
             // out whether to jump back to loop top or to the instruction following the call site.
-            // Symmetrizing loop execution to always require at least 2 iterations and replacing
-            // the jump with cmovcc does worse because that significantly increases INST_RETIRED.
-            // Attempting to reduce load/bucket by increasing total bucket count causes backend
-            // stalls due to more L1 misses. In addition to better hashing, you could also try
-            // packing the city names tightly in a separate arena and keeping only a 32-bit offset
-            // to each city name in Entry. Currently, we dedicate a sparse ~40B buffer for every
-            // city name in the map which increases L1 footprint. If nothing else, the city name
-            // allocator would buy us some headroom to widen the Entry array, hopefully reducing
-            // the number of >1 entry buckets in the map.
+            // Always probing two entries for a match also does't work. Attempting to reduce load
+            // per bucket by increasing total number of buckets causes backend stalls due to more
+            // L1 misses.
+            //
+            // In addition to better hashing, you could also try packing the city names tightly in
+            // a separate arena and keeping only a 32b offset to each city name in Entry. Currently,
+            // we dedicate a sparse ~40B buffer for every city name in the map which increases L1
+            // footprint. If nothing else, the city name allocator would buy us some headroom to
+            // widen the Entry array, hopefully reducing the number of >1 entry buckets in the map.
+            //
+            // [^This didn't work. The prefetch in hash_and_prefetch is absolutely crucial. Keeping
+            //   the city name inline within each Entry has the benefit of prefetching the city
+            //   name very early. If we instead store an offset or pointer per Entry, then city
+            //   name prefetch cannot begin until the Entry itself hits L1. This dependent load
+            //   makes things way slower. The better hash idea is also a bust for this reason.
+            //   Even a 2c extra compute in hash_and_prefetch is costing us 10s of milliseconds.
+            //   Also tried involving 8B from the city name instead of 4 when city length > 7.
+            //   This did reduce the number of dirty buckets, but note that we don't know city
+            //   length until we decode the semicolon position. Waiting for semicolon decode
+            //   delays the prefetch and hence, worse performance. Perhaps try extracting data
+            //   from the loaded city_vec directly rather than just computing critical offsets?]
+            //
+            // Loading lines from the mapped file is also polluting the cache. We can perhaps,
+            // try streaming loads, but that'd require we don't dereference the line pointer
+            // anywhere else.
             if (count >= e->city_name_length) {
                 return e;
             }
@@ -276,7 +298,7 @@ struct CityNameMap {
         u32 index = *((u32 *) city_beg);
         index = index % N_BUCKETS;
         u8* entries = (u8 *) buckets[index].entries;
-        _mm_prefetch(entries, _MM_HINT_T0);
+        __builtin_prefetch(entries);
         return index;
     }
 
@@ -367,18 +389,32 @@ void do_merge(CityNameMap* map, CombinationTaskQueue* combination_task_queue) {
     combination_task_queue->unlock();
 }
 
-// Branchless temperature parsing. This is in the hotpath.
-// Introducing even a single branch costs 80-100ms.
+// Branchless temperature parsing. This is in the hotpath; Introducing even a single
+// branch costs 80-100ms. We don't really have to do it this way, provided we already
+// have the temperature bytes in a vector. A straightforward SIMD routine could reduce
+// the hard dependency through 'shift' which is making things at least a bit slower.
 int parse_temperature(u8* num_beg, int& len) {
+    static constexpr u64 C = 1 + (10 << 16) + (100 << 24);
     int sign = 1 - 2 * (num_beg[0] == '-');
     int pos = (num_beg[0] == '-');
+
+    // Copy 4 bytes beginning from the first digit, skipping the '-' if present.
     u32 uvalue;
     memcpy(&uvalue, num_beg + pos, 4);
     int shift = 8 * (num_beg[pos + 1] == '.');
+
+    // Align the ascii digits such that their position matches the intended mask position.
+    // If there's only a single digit before '.', then you have '\n' in the uvalue window.
+    // If '\n' exists in the uvalue window, then the shift makes it fall off the window.
     uvalue <<= shift;
-    constexpr u64 C = 1 + (10 << 16) + (100 << 24);
+
+    // Convert ascii letters to actual digits (e.g. '2' -> 2). The '.' becomes 0.
     uvalue &= 0x0f000f0f;
+
+    // SWAR reduce.
     uvalue = ((uvalue * C) >> 24) & 0x3ff;
+
+    // How many bytes constitute the temperature?
     len = pos + 4 - (shift >> 3);
     return (int) uvalue * sign;
 }
@@ -401,8 +437,7 @@ void parse_helper(u8* beg, u8* end, CityNameMap* map) {
     }
 }
 
-// Both beg and end are 0-indexed. Dereferencing either is fine.
-// The chunk starts at `beg` and ends at `end`.
+// Both beg and end are 0-indexed. Chunk starts at `beg` and ends at `end`.
 void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) {
     CityNameMap* map = new CityNameMap;
     __m256i semicolon_vec = _mm256_set1_epi8(';');
@@ -418,6 +453,9 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
             __m256i semi_cmp = _mm256_cmpeq_epi8(window, semicolon_vec);
             u32 semi_mask = (u32) _mm256_movemask_epi8(semi_cmp);
             if (semi_mask == 0) {
+                // Test dataset has no city names exceeding 27 bytes. But this is
+                // disaster waiting to happen if dataset changes. Consider adding
+                // a slow path for longer names.
                 printf("FIXME: didn't find semicolon!\n");
                 exit(1);
             }
@@ -442,6 +480,9 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
         __m256i semi_cmp1 = _mm256_cmpeq_epi8(window, semicolon_vec);
         u32 semi_mask1 = (u32) _mm256_movemask_epi8(semi_cmp1);
         if (semi_mask1 == 0) {
+            // Test dataset has no city names exceeding 27 bytes. But this is
+            // disaster waiting to happen if dataset changes. Consider adding
+            // a slow path for longer names.
             printf("FIXME: didn't find semicolon!\n");
             exit(1);
         }
@@ -455,6 +496,9 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
         __m256i semi_cmp2 = _mm256_cmpeq_epi8(entry_vec2, semicolon_vec);
         u32 semi_mask2 = (u32) _mm256_movemask_epi8(semi_cmp2);
         if (semi_mask2 == 0) {
+            // Test dataset has no city names exceeding 27 bytes. But this is
+            // disaster waiting to happen if dataset changes. Consider adding
+            // a slow path for longer names.
             printf("FIXME: didn't find semicolon!\n");
             exit(1);
         }

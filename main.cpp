@@ -245,7 +245,7 @@ struct CityNameBucket {
         Entry* e = city_in_bucket_avx2(city_vec);
 
         if (e == nullptr) {
-            u8* city_end = (u8 *) (input.city_name + input.city_name_length);
+            u8* city_end = (u8 *) (input.city_name + input.city_name_length - 1);
             e = add_new_entry(city_beg, city_end, 0, input.bucket_index);
             e->min = input.min;
             e->max = input.max;

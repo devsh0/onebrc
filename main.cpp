@@ -446,6 +446,11 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
     __m256i newline_vec = _mm256_set1_epi8('\n');
 
     while (beg + 64 <= end) {
+        // Repeats prefetching the same line on the next iteration.
+        // Still 10ms faster for some reason.
+        prefetch(beg + 64);
+        prefetch(beg + 128);
+
         // Find the first newline to locate line 2 start.
         __m256i window = _mm256_loadu_si256((__m256i const *) beg);
         __m256i nl_cmp = _mm256_cmpeq_epi8(window, newline_vec);

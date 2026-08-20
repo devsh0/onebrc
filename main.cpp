@@ -299,8 +299,8 @@ struct CityNameMap {
         u32 index;
         memcpy(&index, city_beg, sizeof(u32));
         index = index % N_BUCKETS;
-        // Two loads back to back, and what follows is another call to hash_and_prefetch! :(
-        // This is causing serious contention on port 2,3. No, you can't remove the prefetch.
+        // Two loads back to back, and what follows is another call to hash_and_prefetch!
+        // The dependent load here is already a problem, contention on port 2,3 is cherry on top.
         u8* entries = (u8*) buckets[index].entries;
         prefetch(entries);
         return index;

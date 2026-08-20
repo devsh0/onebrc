@@ -151,7 +151,7 @@ struct CityNameBucket {
             entries = new_entries;
         }
 
-        if (city_end - city_beg + 2 > NAME_LENGTH, 0) {
+        if (city_end - city_beg + 2 > NAME_LENGTH) {
             printf("FIXME: can't handle city names > %d characters\n", NAME_LENGTH - 1);
             exit(-1);
         }

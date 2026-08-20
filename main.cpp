@@ -15,6 +15,7 @@
 #include <immintrin.h>
 #include <time.h>
 
+#define prefetch(x) __builtin_prefetch(x)
 #define gettid() ((pid_t)syscall(SYS_gettid))
 #define BENCH_START u64 __start_time = micros()
 #define BENCH_END u64 __total_time = micros() - __start_time
@@ -135,7 +136,7 @@ struct CityNameBucket {
     u8 size = 0;
 
     Entry* add_new_entry(u8* city_beg, u8* city_end, int temperature, int bucket_index) {
-        if (__builtin_expect(size == current_capacity, 0)) {
+        if (size == current_capacity) {
             if (current_capacity == 0) {
                 // Most buckets only hold a single entry. So start out thin.
                 current_capacity = 1;
@@ -150,7 +151,7 @@ struct CityNameBucket {
             entries = new_entries;
         }
 
-        if (__builtin_expect(city_end - city_beg + 2 > NAME_LENGTH, 0)) {
+        if (city_end - city_beg + 2 > NAME_LENGTH, 0) {
             printf("FIXME: can't handle city names > %d characters\n", NAME_LENGTH - 1);
             exit(-1);
         }
@@ -295,10 +296,11 @@ struct CityNameMap {
 
     // Some city names are 3-byte long. But what follows is a semicolon so we're good.
     u32 hash_and_prefetch(u8* city_beg) {
-        u32 index = *((u32 *) city_beg);
+        u32 index;
+        memcpy(&index, city_beg, sizeof(u32));
         index = index % N_BUCKETS;
         u8* entries = (u8 *) buckets[index].entries;
-        __builtin_prefetch(entries);
+        prefetch(entries);
         return index;
     }
 

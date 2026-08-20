@@ -452,7 +452,7 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
         prefetch(beg + 128);
 
         // Find the first newline to locate line 2 start.
-        __m256i window = _mm256_loadu_si256((__m256i const *) beg);
+        __m256i window = _mm256_lddqu_si256((__m256i const *) beg);
         __m256i nl_cmp = _mm256_cmpeq_epi8(window, newline_vec);
         u32 nl_mask = (u32) _mm256_movemask_epi8(nl_cmp);
         if (nl_mask == 0) {
@@ -499,7 +499,7 @@ void parse_avx2(u8* beg, u8* end, CombinationTaskQueue* combination_task_queue) 
         int temp1 = parse_temperature(semi1 + 1, num_len1);
 
         // Line 2: load + semicolon search.
-        __m256i entry_vec2 = _mm256_loadu_si256((__m256i const *) city_beg2);
+        __m256i entry_vec2 = _mm256_lddqu_si256((__m256i const *) city_beg2);
         __m256i semi_cmp2 = _mm256_cmpeq_epi8(entry_vec2, semicolon_vec);
         u32 semi_mask2 = (u32) _mm256_movemask_epi8(semi_cmp2);
         if (semi_mask2 == 0) {

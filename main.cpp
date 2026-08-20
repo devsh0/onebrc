@@ -24,8 +24,8 @@
 #define BENCH_END_AND_REPORT BENCH_END; BENCH_REPORT
 
 static constexpr int N_WORKERS = 64;
-static constexpr size_t N_BUCKETS = 2017;
-static constexpr int NAME_LENGTH = 39;
+static constexpr size_t N_BUCKETS = 4389;
+static constexpr int NAME_LENGTH = 27;
 
 using u8 = uint8_t;
 using u16 = uint16_t;
@@ -113,7 +113,7 @@ struct TaskData {
     int cpuid = -1;
 };
 
-struct alignas(64) Entry {
+struct Entry {
     char city_name[NAME_LENGTH];
     i8 city_name_length = 0;
     int total_temperature = 0;
@@ -198,20 +198,20 @@ struct CityNameBucket {
             //
             // In addition to better hashing, you could also try packing the city names tightly in
             // a separate arena and keeping only a 32b offset to each city name in Entry. Currently,
-            // we dedicate a sparse ~40B buffer for every city name in the map which increases L1
+            // we dedicate a sparse ~30B buffer for every city name in the map which increases L1
             // footprint. If nothing else, the city name allocator would buy us some headroom to
-            // widen the Entry array, hopefully reducing the number of >1 entry buckets in the map.
+            // increas total buckets, hopefully reducing the number of >1 entry buckets in the map.
             //
             // [^This didn't work. The prefetch in hash_and_prefetch is absolutely crucial. Keeping
             //   the city name inline within each Entry has the benefit of prefetching the city
             //   name very early. If we instead store an offset or pointer per Entry, then city
             //   name prefetch cannot begin until the Entry itself hits L1. This dependent load
             //   makes things way slower. The better hash idea is also a bust for this reason.
-            //   Even a 2c extra compute in hash_and_prefetch is costing us 10s of milliseconds.
+            //   Even 2c extra compute in hash_and_prefetch is costing us 10s of milliseconds.
             //   Also tried involving 8B from the city name instead of 4 when city length > 7.
             //   This did reduce the number of dirty buckets, but note that we don't know city
             //   length until we decode the semicolon position. Waiting for semicolon decode
-            //   delays the prefetch and hence, worse performance. Perhaps try extracting data
+            //   delays the prefetch and hence worsens performance. Perhaps try extracting data
             //   from the loaded city_vec directly rather than just computing critical offsets?]
             //
             // Loading lines from the mapped file is also polluting the cache. We can perhaps,

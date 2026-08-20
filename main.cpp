@@ -25,7 +25,7 @@
 
 static constexpr int N_WORKERS = 64;
 static constexpr size_t N_BUCKETS = 4389;
-static constexpr int NAME_LENGTH = 27;
+static constexpr int NAME_LENGTH = 28;
 
 using u8 = uint8_t;
 using u16 = uint16_t;
@@ -115,12 +115,12 @@ struct TaskData {
 
 struct Entry {
     char city_name[NAME_LENGTH];
-    i8 city_name_length = 0;
     int total_temperature = 0;
     int occurrences = 0;
     short min = 0;
     short max = 0;
     short bucket_index = -1;
+    i8 city_name_length = 0;
 
     void print() {
         printf("%s=%.1f/%.1f/%.1f", city_name, min / 10.f, (total_temperature / 10.f) / (float) occurrences, max / 10.f);
@@ -299,7 +299,9 @@ struct CityNameMap {
         u32 index;
         memcpy(&index, city_beg, sizeof(u32));
         index = index % N_BUCKETS;
-        u8* entries = (u8 *) buckets[index].entries;
+        // Two loads back to back, and what follows is another call to hash_and_prefetch! :(
+        // This is causing serious contention on port 2,3. No, you can't remove the prefetch.
+        u8* entries = (u8*) buckets[index].entries;
         prefetch(entries);
         return index;
     }
